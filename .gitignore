@@ -1,0 +1,16 @@
+trade_data_raw/
+trade_data_raw_batched/
+*.csv
+extraction_progress*.json
+*.png
+!charts/
+!charts/*.png
+__pycache__/
+spark-warehouse/
+metastore_db/
+derby.log
+.env
+.venv/
+venv/
+
+.vscode/
