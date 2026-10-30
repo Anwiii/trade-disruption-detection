@@ -108,7 +108,12 @@ def run_analysis(pdf, event_period, group_cols, country_filter_col, country_val,
         baseline = group_df[group_df["period"] < event_period].copy()
         evaluation = group_df[group_df["period"] >= event_period]
 
-        if len(baseline) < 12 or (baseline["trade_value"] > 0).sum() < 6 or len(evaluation) < 1:
+        # Require at least 24 months of baseline. A trend line fit on a
+        # short history extrapolates badly over a long evaluation period -
+        # small errors in the growth rate compound over years and make
+        # ordinary months look like huge anomalies (see the 2018 test case).
+        MIN_BASELINE_MONTHS = 24
+        if len(baseline) < MIN_BASELINE_MONTHS or (baseline["trade_value"] > 0).sum() < 6 or len(evaluation) < 1:
             continue
 
         baseline["log_value"] = np.log1p(baseline["trade_value"])
@@ -163,6 +168,14 @@ else:
 
 ey, em = map(int, event_date_str.split("-"))
 event_period = ey * 100 + em
+
+months_of_history = (ey - 2017) * 12 + (em - 1)
+if months_of_history < 24:
+    st.sidebar.warning(
+        f"Only {months_of_history} months of data exist before this date "
+        f"(data starts 2017-01). Series need 24+ months of history to fit a "
+        f"reliable trend - results for this date may be unreliable or missing."
+    )
 
 source = st.sidebar.radio("Data source", ["UN Comtrade (reporter-side)", "Mirror statistics (Russia/Belarus via partners)"])
 
@@ -283,26 +296,58 @@ if run:
     # ---- GDELT panel (only for reporter-side country selections with a GDELT code) ----
     if gdelt is not None and source.startswith("UN Comtrade") and country_val != "All":
         st.subheader("Potentially related GDELT events")
-        st.caption("Timing overlap only - not proof of cause.")
+        st.caption(
+            "Shows event categories that became unusually common for this country "
+            "around the event date, compared to that country's own normal rate - "
+            "not just the highest raw counts (large countries generate huge GDELT "
+            "volume regardless of disruption, so raw counts alone are misleading). "
+            "Timing overlap only - not proof of cause."
+        )
 
         iso_lookup = monthly[monthly["reporterDesc"] == country_val]["reporterISO"]
         iso_code = iso_lookup.iloc[0] if len(iso_lookup) else None
 
         if iso_code and iso_code in gdelt["country"].unique():
-            window = gdelt[
-                (gdelt["country"] == iso_code)
-                & (gdelt["period"] >= event_period - 6)
-                & (gdelt["period"] <= event_period + 6)
-            ].copy()
-            cat_totals = window.groupby("EventRootCode")["n_events"].sum().sort_values(ascending=False).head(5)
-            if len(cat_totals):
-                cat_table = pd.DataFrame({
-                    "Event category": [CAMEO_NAMES.get(c, c) for c in cat_totals.index],
-                    "Events (+/-6mo window)": cat_totals.values,
+            country_gdelt = gdelt[gdelt["country"] == iso_code].copy()
+            all_periods_gdelt = [y * 100 + m for y in range(2017, 2026) for m in range(1, 13) if y * 100 + m <= 202512]
+            counts = country_gdelt.pivot_table(index="period", columns="EventRootCode", values="n_events", aggfunc="sum")
+            counts = counts.reindex(all_periods_gdelt).fillna(0)
+            totals = counts.sum(axis=1).replace(0, np.nan)
+            shares = counts.div(totals, axis=0).fillna(0)
+
+            window_mask = (counts.index >= event_period - 6) & (counts.index <= event_period + 6)
+            baseline_mask = ~window_mask  # all other months as "normal" reference
+
+            rows = []
+            for cat in counts.columns:
+                base_count_mean = counts.loc[baseline_mask, cat].mean()
+                if base_count_mean < 20:  # too rare for this country to judge reliably
+                    continue
+                base_share_mean = shares.loc[baseline_mask, cat].mean()
+                base_share_std = shares.loc[baseline_mask, cat].std()
+                if not base_share_std or np.isnan(base_share_std):
+                    continue
+                window_z = (shares.loc[window_mask, cat] - base_share_mean) / base_share_std
+                if len(window_z) == 0:
+                    continue
+                best_period = window_z.idxmax()
+                z = window_z.max()
+                times_typical = counts.loc[best_period, cat] / base_count_mean
+                if z < 3.0 or times_typical < 1.5:
+                    continue
+                rows.append({
+                    "Event category": CAMEO_NAMES.get(int(cat), str(cat)),
+                    "Peak month": period_to_date(best_period).strftime("%Y-%m"),
+                    "Events that month": int(counts.loc[best_period, cat]),
+                    "x typical": round(times_typical, 1),
+                    "Spike z-score": round(float(z), 1),
                 })
+
+            if rows:
+                cat_table = pd.DataFrame(rows).sort_values("Spike z-score", ascending=False).head(5)
                 st.dataframe(cat_table, hide_index=True, use_container_width=True)
             else:
-                st.write("No GDELT data for this country/window.")
+                st.write("No event category clearly spiked above normal in this window.")
         else:
             st.write(f"No GDELT data found for country code matching '{country_val}'.")
 else:
