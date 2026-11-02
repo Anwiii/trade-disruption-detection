@@ -2,4 +2,4 @@ Validation positive labels: 16
 Test positive labels: 498
 Thresholds selected on validation: {'std': 2.0, 'robust_MAD': 2.0}, naive=0.3, IF_contamination=0.05, cusum=3.0
 False alarm rate in control period: 19.3% (627/3248)
-Early warning: 11 of 10 series warned early, mean lead 7.8 months
+Early warning: 11 of 18 eligible series warned early, mean lead 7.8 months
